@@ -1,8 +1,14 @@
 import 'package:flutter/material.dart';
+import 'screens/login_screen.dart';
 
 void main() {
-  runApp(const MainApp());
+  runApp(MaterialApp(
+    debugShowCheckedModeBanner: false,
+    home: LoginScreen(),
+  ));
 }
+
+
 
 class MainApp extends StatelessWidget {
   const MainApp({super.key});
