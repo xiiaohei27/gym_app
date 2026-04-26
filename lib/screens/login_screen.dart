@@ -74,7 +74,10 @@ class _LoginScreenState extends State<LoginScreen> {
           .sendPasswordResetEmail(email: _emailController.text.trim());
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Password reset email sent!')),
+          const SnackBar(
+            content: Text('Password reset email sent! Check your inbox.'),
+            backgroundColor: Colors.green,
+          ),
         );
       }
     } on FirebaseAuthException catch (e) {
@@ -164,14 +167,16 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ),
 
-                  // Forgot Password
+                  // Forgot Password (Login mode only)
                   if (_isLoginMode)
                     Align(
                       alignment: Alignment.centerRight,
                       child: TextButton(
                         onPressed: _resetPassword,
-                        child: const Text('Forgot Password?',
-                            style: TextStyle(color: Color(0xFF00D4FF))),
+                        child: const Text(
+                          'Forgot Password?',
+                          style: TextStyle(color: Color(0xFF00D4FF)),
+                        ),
                       ),
                     ),
 

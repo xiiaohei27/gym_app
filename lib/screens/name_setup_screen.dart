@@ -39,6 +39,7 @@ class _NameSetupScreenState extends State<NameSetupScreen> {
 // Force reload user so displayName updates immediately
       await FirebaseAuth.instance.currentUser?.reload();
 
+
       if (mounted) {
         Navigator.pushReplacement(
           context,
