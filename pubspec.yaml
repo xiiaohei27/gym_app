@@ -6,13 +6,6 @@ version: 0.1.0+1
 environment:
   sdk: ^3.11.4
 
-dependencies:
-  fl_chart: ^1.2.0
-  flutter:
-    sdk: flutter
-  google_maps_flutter: ^2.17.0
-
-
 fl_dependencies:
   flutter:
     sdk: flutter
@@ -30,3 +23,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+dependencies:
+  flutter:
+    sdk: flutter
+  fl_chart: ^0.68.0
+  google_maps_flutter: ^2.5.0
+  geolocator: ^14.0.0
+  http: ^1.2.2
