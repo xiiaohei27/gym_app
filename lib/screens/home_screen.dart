@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'workout_screen.dart';
 import 'progress_screen.dart';
 import 'map_screen.dart';
+import 'timer_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   @override
@@ -21,6 +22,16 @@ class HomeScreen extends StatelessWidget {
           ListTile(
             title: Text("Gym Locator"),
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => MapScreen())),
+          ),
+          ListTile(
+            title: const Text("Workout Timer"),
+            leading: const Icon(Icons.timer),
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const TimerScreen()),
+              );
+            },
           ),
         ],
       ),
