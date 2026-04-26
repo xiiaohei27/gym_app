@@ -6,15 +6,15 @@ version: 0.1.0+1
 environment:
   sdk: ^3.11.4
 
-fl_dependencies:
+dependencies:
   flutter:
     sdk: flutter
-    fl_chart: ^0.68.0
-
-Google_dependencies:
-   flutter:
-    sdk: flutter
-    google_maps_flutter: ^2.5.0
+  fl_chart: ^0.68.0
+  google_maps_flutter: ^2.5.0
+  geolocator: ^14.0.0
+  http: ^1.2.2
+  firebase_core: ^3.0.0
+  firebase_auth: ^5.0.0
 
 dev_dependencies:
   flutter_test:
@@ -23,11 +23,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-
-dependencies:
-  flutter:
-    sdk: flutter
-  fl_chart: ^0.68.0
-  google_maps_flutter: ^2.5.0
-  geolocator: ^14.0.0
-  http: ^1.2.2
