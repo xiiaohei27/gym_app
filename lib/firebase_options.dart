@@ -59,4 +59,5 @@ class DefaultFirebaseOptions {
     projectId: 'gym-app-84870',
     storageBucket: 'gym-app-84870.firebasestorage.app',
   );
+
 }
