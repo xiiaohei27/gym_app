@@ -57,6 +57,7 @@ class DefaultFirebaseOptions {
     appId: '1:636319535245:android:a892ecab6c4e7fb94d92c4',
     messagingSenderId: '636319535245',
     projectId: 'gym-app-84870',
+    databaseURL: 'https://gym-app-84870-default-rtdb.asia-southeast1.firebasedatabase.app',
     storageBucket: 'gym-app-84870.firebasestorage.app',
   );
 

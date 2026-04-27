@@ -107,6 +107,32 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
     super.dispose();
   }
 
+  Future<void> _saveWorkoutLog() async {
+    final w = selectedWorkout;
+    if (w == null) return;
+
+    // Total work seconds across all exercises x rounds
+    final totalWorkSeconds = w.exercises
+        .fold(0, (sum, ex) => sum + ex.workSeconds);
+    final totalSeconds = totalWorkSeconds * w.rounds;
+
+    // ~7 kcal per minute of work
+    final caloriesBurned = ((totalSeconds / 60) * 7).round();
+
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(_uid)
+        .collection('workout_logs')
+        .add({
+      'workoutName': w.name,
+      'category': w.category,
+      'rounds': w.rounds,
+      'totalSeconds': totalSeconds,
+      'caloriesBurned': caloriesBurned,
+      'date': FieldValue.serverTimestamp(),
+    });
+  }
+
   // ── Timer Logic ───────────────────────────────────────────────────────────
 
   void _startTimer() {
@@ -157,6 +183,7 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
   void _finishWorkout() {
     _playAlarm();
     setState(() { isFinished = true; isRunning = false; _transitioning = false; });
+    _saveWorkoutLog();
   }
 
   Future<void> _playAlarm() async {
@@ -615,3 +642,4 @@ class _ExerciseFormEntry {
 
   void dispose() { nameCtrl.dispose(); workCtrl.dispose(); restCtrl.dispose(); }
 }
+
