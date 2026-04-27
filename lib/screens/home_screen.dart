@@ -84,7 +84,7 @@ class HomeScreen extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             const Text(
-              "Let's 12344crush today's workout!",
+              "Let's crush today's workout!",
               style: TextStyle(color: Colors.white54, fontSize: 14),
             ),
 
