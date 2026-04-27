@@ -2,10 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:fl_chart/fl_chart.dart';
 
-import 'workout_screen.dart';
 import 'progress_screen.dart';
 import 'map_screen.dart';
-import 'timer_screen.dart';
+import 'workout_session_screen.dart';
 import 'login_screen.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -93,23 +92,7 @@ class HomeScreen extends StatelessWidget {
 
             // Quick Access 4 buttons
             Row(
-              children: [
-                Expanded(
-                  child: _NavButton(
-                    label: 'Workouts',
-                    icon: Icons.fitness_center,
-                    color: const Color(0xFF00D4FF),
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const WorkoutScreen(),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(width: 12),
+              children:[
                 Expanded(
                   child: _NavButton(
                     label: 'Progress',
@@ -150,14 +133,14 @@ class HomeScreen extends StatelessWidget {
                 const SizedBox(width: 12),
                 Expanded(
                   child: _NavButton(
-                    label: 'Timer',
-                    icon: Icons.timer,
+                    label: 'Workout Session',
+                    icon: Icons.fitness_center,
                     color: Colors.purpleAccent,
                     onTap: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => const TimerScreen(),
+                          builder: (_) => const WorkoutSessionScreen(),
                         ),
                       );
                     },
