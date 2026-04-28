@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 // ── Models ────────────────────────────────────────────────────────────────────
 
@@ -13,8 +14,8 @@ class WorkoutExercise {
 
   Map<String, dynamic> toMap() => {'name': name, 'workSeconds': workSeconds, 'restSeconds': restSeconds};
 
-  factory WorkoutExercise.fromMap(Map<String, dynamic> m) => WorkoutExercise(
-      name: m['name'] ?? '', workSeconds: m['workSeconds'] ?? 30, restSeconds: m['restSeconds'] ?? 10);
+  factory WorkoutExercise.fromMap(Map<String, dynamic> m) =>
+      WorkoutExercise(name: m['name'] ?? '', workSeconds: m['workSeconds'] ?? 30, restSeconds: m['restSeconds'] ?? 10);
 }
 
 class SavedWorkout {
@@ -33,6 +34,21 @@ class SavedWorkout {
         : <WorkoutExercise>[];
     return SavedWorkout(id: doc.id, name: d['name'] ?? '', rounds: d['rounds'] ?? 1, category: d['category'] ?? 'General', exercises: exercises);
   }
+}
+
+// ── Alarm Sound ───────────────────────────────────────────────────────────────
+
+enum AlarmSound {
+  beep('Beep', Icons.graphic_eq_rounded, 'sounds/beep.mp3'),
+  bell('Bell', Icons.notifications_rounded, 'sounds/bell.mp3'),
+  buzzer('Buzzer', Icons.volume_up_rounded, 'sounds/buzzer.mp3'),
+  chime('Chime', Icons.music_note_rounded, 'sounds/chime.mp3'),
+  whistle('Whistle', Icons.sports_rounded, 'sounds/whistle.mp3');
+
+  final String label;
+  final IconData icon;
+  final String assetPath;
+  const AlarmSound(this.label, this.icon, this.assetPath);
 }
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
@@ -56,11 +72,13 @@ class WorkoutSessionScreen extends StatefulWidget {
   State<WorkoutSessionScreen> createState() => _WorkoutSessionScreenState();
 }
 
-class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
-    with SingleTickerProviderStateMixin {
-
+class _WorkoutSessionScreenState extends State<WorkoutSessionScreen> with SingleTickerProviderStateMixin {
   Timer? _timer;
   bool _transitioning = false;
+
+  final AudioPlayer _audio = AudioPlayer();
+  AlarmSound _alarm = AlarmSound.beep;
+  bool _showAlarmPicker = false;
 
   SavedWorkout? selectedWorkout;
   int currentRound = 1, currentExerciseIndex = 0, remainingSeconds = 0;
@@ -68,166 +86,94 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
 
   final _nameCtrl   = TextEditingController();
   final _roundsCtrl = TextEditingController(text: '3');
-  String _selectedCategory = 'Strength';
-  final List<_ExerciseFormEntry> _exerciseEntries = [_ExerciseFormEntry()];
+  String _category  = 'Strength';
+  final List<_ExEntry> _entries = [_ExEntry()];
 
-  late final AnimationController _pulseCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 800))..repeat(reverse: true);
-  late final Animation<double> _pulse = Tween(begin: 1.0, end: 1.05).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
+  late final AnimationController _pulseCtrl =
+  AnimationController(vsync: this, duration: const Duration(milliseconds: 800))..repeat(reverse: true);
+  late final Animation<double> _pulse =
+  Tween(begin: 1.0, end: 1.05).animate(CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut));
 
   String get _uid => FirebaseAuth.instance.currentUser!.uid;
-  CollectionReference<Map<String, dynamic>> get _workoutRef =>
+  CollectionReference<Map<String, dynamic>> get _ref =>
       FirebaseFirestore.instance.collection('users').doc(_uid).collection('workouts');
 
-  WorkoutExercise? get _currentExercise {
-    if (selectedWorkout == null || currentExerciseIndex >= selectedWorkout!.exercises.length) return null;
-    return selectedWorkout!.exercises[currentExerciseIndex];
-  }
+  WorkoutExercise? get _curEx =>
+      (selectedWorkout == null || currentExerciseIndex >= selectedWorkout!.exercises.length)
+          ? null
+          : selectedWorkout!.exercises[currentExerciseIndex];
 
-  Color get _stageColor => isFinished ? _T.purple : isResting ? _T.amber : _T.cyan;
-  String get _stageLabel => isFinished ? 'DONE!' : isResting ? 'REST' : 'GO!';
+  Color  get _col   => isFinished ? _T.purple : isResting ? _T.amber : _T.cyan;
+  String get _label => isFinished ? 'DONE!'   : isResting ? 'REST'   : 'GO!';
 
-  // During work: current exercise name.
-  // During rest: the NEXT exercise name, or "Last rest!" if none remains.
   String get _pillLabel {
-    if (!isResting) return _currentExercise!.name;
-    final exercises = selectedWorkout!.exercises;
-    final nextIdx = currentExerciseIndex + 1;
-    if (nextIdx < exercises.length) return 'Up next: ${exercises[nextIdx].name}';
-    if (currentRound < selectedWorkout!.rounds) return 'Up next: ${exercises.first.name}';
+    if (!isResting) return _curEx!.name;
+    final exs  = selectedWorkout!.exercises;
+    final next = currentExerciseIndex + 1;
+    if (next < exs.length) return 'Up next: ${exs[next].name}';
+    if (currentRound < selectedWorkout!.rounds) {
+      return 'Up next: ${exs.first.name}';
+    }
     return 'Last rest!';
   }
 
   @override
   void dispose() {
-    _timer?.cancel(); _pulseCtrl.dispose();
-    _nameCtrl.dispose(); _roundsCtrl.dispose();
-    for (final e in _exerciseEntries) {
+    _timer?.cancel();
+    _pulseCtrl.dispose();
+    _nameCtrl.dispose();
+    _roundsCtrl.dispose();
+    // FIX: stop audio before disposing so it doesn't keep ringing after leaving screen
+    _audio.stop();
+    _audio.dispose();
+    for (final e in _entries) {
       e.dispose();
     }
     super.dispose();
   }
 
-  Future<void> _saveWorkoutLog() async {
+  // ── Firestore ─────────────────────────────────────────────────────────────
+
+  Future<void> _saveLog() async {
     final w = selectedWorkout;
     if (w == null) return;
-
-    // Total work seconds across all exercises x rounds
-    final totalWorkSeconds = w.exercises
-        .fold(0, (sum, ex) => sum + ex.workSeconds);
-    final totalSeconds = totalWorkSeconds * w.rounds;
-
-    // ~7 kcal per minute of work
-    final caloriesBurned = ((totalSeconds / 60) * 7).round();
-
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(_uid)
-        .collection('workout_logs')
-        .add({
-      'workoutName': w.name,
-      'category': w.category,
-      'rounds': w.rounds,
-      'totalSeconds': totalSeconds,
-      'caloriesBurned': caloriesBurned,
-      'date': FieldValue.serverTimestamp(),
-    });
-  }
-
-  // ── Timer Logic ───────────────────────────────────────────────────────────
-
-  void _startTimer() {
-    if (selectedWorkout == null || isRunning || isFinished) return;
-    setState(() => isRunning = true);
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      if (remainingSeconds > 1) {
-        setState(() => remainingSeconds--);
-      } else {
-        _timer?.cancel(); _timer = null;
-        if (!_transitioning) { _transitioning = true; setState(() => remainingSeconds = 0); _nextStage(); }
-      }
-    });
-  }
-
-  void _pauseTimer() { _timer?.cancel(); _timer = null; setState(() => isRunning = false); }
-
-  void _resetTimer() {
-    _timer?.cancel(); _timer = null; _transitioning = false;
-    setState(() {
-      currentRound = 1; currentExerciseIndex = 0;
-      remainingSeconds = selectedWorkout!.exercises.first.workSeconds;
-      isRunning = false; isResting = false; isFinished = false;
-    });
-  }
-
-  void _nextStage() {
-    _playAlarm();
-    final w = selectedWorkout!;
-    if (!isResting) {
-      setState(() { isResting = true; remainingSeconds = _currentExercise!.restSeconds; isRunning = false; _transitioning = false; });
-      Future.microtask(_startTimer);
-    } else {
-      final nextIdx = currentExerciseIndex + 1;
-      if (nextIdx < w.exercises.length) {
-        setState(() { currentExerciseIndex = nextIdx; isResting = false; remainingSeconds = w.exercises[nextIdx].workSeconds; isRunning = false; _transitioning = false; });
-        Future.microtask(_startTimer);
-      } else if (currentRound < w.rounds) {
-        setState(() { currentRound++; currentExerciseIndex = 0; isResting = false; remainingSeconds = w.exercises.first.workSeconds; isRunning = false; _transitioning = false; });
-        Future.microtask(_startTimer);
-      } else {
-        _finishWorkout();
-      }
-    }
-  }
-
-  void _finishWorkout() {
-    _playAlarm();
-    setState(() { isFinished = true; isRunning = false; _transitioning = false; });
-    _saveWorkoutLog();
-  }
-
-  Future<void> _playAlarm() async {
-    await SystemSound.play(SystemSoundType.alert);
-    await HapticFeedback.heavyImpact();
-  }
-
-  void _selectWorkout(SavedWorkout w) {
-    if (w.exercises.isEmpty) {
-      _showSnack("This workout has no stages — tap Create to add exercises.");
-      return;
-    }
-    _timer?.cancel(); _timer = null; _transitioning = false;
-    setState(() {
-      selectedWorkout = w; currentRound = 1; currentExerciseIndex = 0;
-      remainingSeconds = w.exercises.first.workSeconds;
-      isRunning = false; isResting = false; isFinished = false; showCreateWorkout = false;
+    final totalWork = w.exercises.fold(0, (acc, ex) => acc + ex.workSeconds);
+    final total     = totalWork * w.rounds;
+    await FirebaseFirestore.instance.collection('users').doc(_uid).collection('workout_logs').add({
+      'workoutName'    : w.name,
+      'category'       : w.category,
+      'rounds'         : w.rounds,
+      'totalSeconds'   : total,
+      'caloriesBurned' : ((total / 60) * 7).round(),
+      'date'           : FieldValue.serverTimestamp(),
     });
   }
 
   Future<void> _saveWorkout() async {
     if (_nameCtrl.text.trim().isEmpty) return;
-    final exercises = _exerciseEntries
+    final exs = _entries
         .where((e) => e.nameCtrl.text.trim().isNotEmpty)
         .map((e) => WorkoutExercise(
-      name: e.nameCtrl.text.trim(),
-      workSeconds: int.tryParse(e.workCtrl.text) ?? 30,
-      restSeconds: int.tryParse(e.restCtrl.text) ?? 10,
+      name        : e.nameCtrl.text.trim(),
+      workSeconds : int.tryParse(e.workCtrl.text) ?? 30,
+      restSeconds : int.tryParse(e.restCtrl.text) ?? 10,
     ).toMap())
         .toList();
-    if (exercises.isEmpty) return;
-    await _workoutRef.add({'name': _nameCtrl.text.trim(), 'rounds': int.tryParse(_roundsCtrl.text) ?? 1, 'category': _selectedCategory, 'exercises': exercises});
-    _nameCtrl.clear(); _roundsCtrl.text = '3';
+    if (exs.isEmpty) return;
+    await _ref.add({'name': _nameCtrl.text.trim(), 'rounds': int.tryParse(_roundsCtrl.text) ?? 1, 'category': _category, 'exercises': exs});
+    _nameCtrl.clear();
+    _roundsCtrl.text = '3';
     setState(() {
-      for (final e in _exerciseEntries) {
+      for (final e in _entries) {
         e.dispose();
       }
-      _exerciseEntries..clear()..add(_ExerciseFormEntry());
+      _entries..clear()..add(_ExEntry());
       showCreateWorkout = false;
     });
   }
 
   Future<void> _deleteWorkout(SavedWorkout w) async {
-    final confirmed = await showDialog<bool>(
+    final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: _T.surface,
@@ -236,20 +182,108 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
         content: Text('Delete "${w.name}"? This cannot be undone.', style: const TextStyle(color: Colors.white60)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel', style: TextStyle(color: Colors.white38))),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete', style: TextStyle(color: _T.red, fontWeight: FontWeight.w700)),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx, true),  child: const Text('Delete', style: TextStyle(color: _T.red, fontWeight: FontWeight.w700))),
         ],
       ),
     );
-    if (confirmed == true) {
-      await _workoutRef.doc(w.id).delete();
+    if (ok == true) {
+      await _ref.doc(w.id).delete();
       if (selectedWorkout?.id == w.id) setState(() => selectedWorkout = null);
     }
   }
 
-  void _showSnack(String msg) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+  // ── Timer ─────────────────────────────────────────────────────────────────
+
+  void _start() {
+    if (selectedWorkout == null || isRunning || isFinished) return;
+    setState(() => isRunning = true);
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (remainingSeconds > 1) {
+        setState(() => remainingSeconds--);
+      } else {
+        _timer?.cancel(); _timer = null;
+        if (!_transitioning) { _transitioning = true; setState(() => remainingSeconds = 0); _next(); }
+      }
+    });
+  }
+
+  void _pause() { _timer?.cancel(); _timer = null; setState(() => isRunning = false); }
+
+  void _reset() {
+    _timer?.cancel(); _timer = null; _transitioning = false;
+    // FIX: stop any playing audio when resetting
+    _audio.stop();
+    setState(() {
+      currentRound = 1; currentExerciseIndex = 0;
+      remainingSeconds = selectedWorkout!.exercises.first.workSeconds;
+      isRunning = false; isResting = false; isFinished = false;
+    });
+  }
+
+  void _next() {
+    _playAlarm();
+    final w = selectedWorkout!;
+    if (!isResting) {
+      setState(() { isResting = true; remainingSeconds = _curEx!.restSeconds; isRunning = false; _transitioning = false; });
+      Future.microtask(_start);
+    } else {
+      final ni = currentExerciseIndex + 1;
+      if (ni < w.exercises.length) {
+        setState(() { currentExerciseIndex = ni; isResting = false; remainingSeconds = w.exercises[ni].workSeconds; isRunning = false; _transitioning = false; });
+        Future.microtask(_start);
+      } else if (currentRound < w.rounds) {
+        setState(() { currentRound++; currentExerciseIndex = 0; isResting = false; remainingSeconds = w.exercises.first.workSeconds; isRunning = false; _transitioning = false; });
+        Future.microtask(_start);
+      } else {
+        // FIX: removed duplicate _playAlarm() call here — _playAlarm() is already
+        // called at the top of _next(), so calling it again caused the alarm to
+        // play twice and sometimes linger.
+        setState(() { isFinished = true; isRunning = false; _transitioning = false; });
+        _saveLog();
+      }
+    }
+  }
+
+  void _selectWorkout(SavedWorkout w) {
+    if (w.exercises.isEmpty) { _snack('No stages — create exercises first.'); return; }
+    _timer?.cancel(); _timer = null; _transitioning = false;
+    // FIX: stop any playing audio when switching workouts
+    _audio.stop();
+    setState(() {
+      selectedWorkout = w; currentRound = 1; currentExerciseIndex = 0;
+      remainingSeconds = w.exercises.first.workSeconds;
+      isRunning = false; isResting = false; isFinished = false; showCreateWorkout = false;
+    });
+  }
+
+  // ── Audio ─────────────────────────────────────────────────────────────────
+
+  Future<void> _playAlarm() async {
+    try {
+      // FIX: stop + release before playing to prevent sounds stacking/lingering
+      await _audio.stop();
+      await _audio.release();
+      await _audio.play(AssetSource(_alarm.assetPath));
+    } catch (_) {
+      await SystemSound.play(SystemSoundType.alert);
+    }
+    await HapticFeedback.heavyImpact();
+  }
+
+  Future<void> _preview(AlarmSound s) async {
+    try {
+      // FIX: stop + release before previewing to prevent overlap
+      await _audio.stop();
+      await _audio.release();
+      await _audio.play(AssetSource(s.assetPath));
+    } catch (_) {
+      await SystemSound.play(SystemSoundType.alert);
+    }
+    await HapticFeedback.mediumImpact();
+  }
+
+  void _snack(String msg) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(
     content: Text(msg), backgroundColor: _T.surface, behavior: SnackBarBehavior.floating,
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
   ));
@@ -261,52 +295,100 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: _T.bg,
-    appBar: _appBar(),
+    appBar: _buildAppBar(),
     body: SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
       child: selectedWorkout == null ? _pickerView() : _sessionView(),
     ),
   );
 
-  PreferredSizeWidget _appBar() => AppBar(
+  PreferredSizeWidget _buildAppBar() => AppBar(
     backgroundColor: _T.bg, elevation: 0,
-    leading: IconButton(icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white70, size: 18), onPressed: () => Navigator.maybePop(context)),
-    title: const Text('Workout Session', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700, letterSpacing: 0.4)),
+    leading: IconButton(
+      icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white70, size: 18),
+      onPressed: () => Navigator.maybePop(context),
+    ),
+    title: const Text('Workout Session', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
     actions: [
-      Container(
-        margin: const EdgeInsets.only(right: 14),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(color: _T.purple.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(8), border: Border.all(color: _T.purple.withValues(alpha: 0.3))),
-        child: const Icon(Icons.fitness_center_rounded, color: _T.purple, size: 16),
+      GestureDetector(
+        onTap: () => setState(() => _showAlarmPicker = !_showAlarmPicker),
+        child: Container(
+          margin: const EdgeInsets.only(right: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(color: _T.amber.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(8), border: Border.all(color: _T.amber.withValues(alpha: 0.3))),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(_alarm.icon, color: _T.amber, size: 14),
+            const SizedBox(width: 5),
+            Text(_alarm.label, style: const TextStyle(color: _T.amber, fontSize: 11, fontWeight: FontWeight.w700)),
+          ]),
+        ),
       ),
     ],
   );
 
-  // ── Picker View ───────────────────────────────────────────────────────────
+  // ── Alarm Picker ──────────────────────────────────────────────────────────
 
-  Widget _pickerView() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      RichText(text: const TextSpan(children: [
-        TextSpan(text: 'Choose your\n', style: TextStyle(color: Colors.white70, fontSize: 22, height: 1.4)),
-        TextSpan(text: 'Workout', style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w800, height: 1.1)),
-      ])),
-      const SizedBox(height: 20),
-      _savedWorkoutSection(),
-      const SizedBox(height: 16),
-      if (!showCreateWorkout)
-        _dashedButton(label: 'Create New Workout', icon: Icons.add_rounded, color: _T.cyan, onTap: () => setState(() => showCreateWorkout = true))
-      else
-        _createWorkoutCard(),
-    ],
+  Widget _alarmPicker() => AnimatedContainer(
+    duration: const Duration(milliseconds: 280), curve: Curves.easeOut,
+    margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(color: _T.surface, borderRadius: BorderRadius.circular(16), border: Border.all(color: _T.amber.withValues(alpha: 0.25), width: 1.5)),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        const Icon(Icons.alarm_rounded, color: _T.amber, size: 14),
+        const SizedBox(width: 6),
+        const Text('ALARM SOUND', style: TextStyle(color: _T.amber, fontSize: 11, letterSpacing: 2, fontWeight: FontWeight.w700)),
+        const Spacer(),
+        GestureDetector(onTap: () => setState(() => _showAlarmPicker = false), child: const Icon(Icons.close_rounded, color: Colors.white30, size: 18)),
+      ]),
+      const SizedBox(height: 10),
+      Wrap(spacing: 8, runSpacing: 8, children: AlarmSound.values.map((s) {
+        final sel = _alarm == s;
+        return GestureDetector(
+          onTap: () { setState(() => _alarm = s); _preview(s); },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: sel ? _T.amber.withValues(alpha: 0.18) : _T.surfaceAlt,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: sel ? _T.amber : _T.border, width: sel ? 1.5 : 1),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(s.icon, color: sel ? _T.amber : Colors.white38, size: 14),
+              const SizedBox(width: 6),
+              Text(s.label, style: TextStyle(color: sel ? _T.amber : Colors.white60, fontSize: 12, fontWeight: sel ? FontWeight.w700 : FontWeight.w500)),
+              if (sel) ...[const SizedBox(width: 5), const Icon(Icons.check_circle_rounded, color: _T.amber, size: 12)],
+            ]),
+          ),
+        );
+      }).toList()),
+      const SizedBox(height: 6),
+      const Text('Tap a sound to preview', style: TextStyle(color: Colors.white24, fontSize: 11)),
+    ]),
   );
 
-  Widget _dashedButton({required String label, required IconData icon, required Color color, required VoidCallback onTap}) =>
+  // ── Picker View ───────────────────────────────────────────────────────────
+
+  Widget _pickerView() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    if (_showAlarmPicker) _alarmPicker(),
+    RichText(text: const TextSpan(children: [
+      TextSpan(text: 'Choose your\n', style: TextStyle(color: Colors.white70, fontSize: 22, height: 1.4)),
+      TextSpan(text: 'Workout',       style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w800, height: 1.1)),
+    ])),
+    const SizedBox(height: 20),
+    _workoutList(),
+    const SizedBox(height: 16),
+    if (!showCreateWorkout)
+      _dashedBtn(label: 'Create New Workout', icon: Icons.add_rounded, color: _T.cyan, onTap: () => setState(() => showCreateWorkout = true))
+    else
+      _createCard(),
+  ]);
+
+  Widget _dashedBtn({required String label, required IconData icon, required Color color, required VoidCallback onTap}) =>
       GestureDetector(
         onTap: onTap,
         child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 16),
+          width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 16),
           decoration: BoxDecoration(borderRadius: BorderRadius.circular(16), border: Border.all(color: color.withValues(alpha: 0.4), width: 1.5), color: color.withValues(alpha: 0.05)),
           child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
             Icon(icon, color: color, size: 18), const SizedBox(width: 8),
@@ -317,31 +399,41 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
 
   // ── Session View ──────────────────────────────────────────────────────────
 
-  Widget _sessionView() => Column(
-    children: [
-      _stagePill(), const SizedBox(height: 14),
-      _timerCard(),   const SizedBox(height: 14),
-      _exerciseRoadmap(), const SizedBox(height: 16),
-      _controls(),    const SizedBox(height: 8),
-      TextButton.icon(
-        onPressed: () { _timer?.cancel(); _timer = null; setState(() => selectedWorkout = null); },
-        icon: const Icon(Icons.swap_horiz_rounded, color: Colors.white30, size: 18),
-        label: const Text('Change Workout', style: TextStyle(color: Colors.white30, fontSize: 13)),
-      ),
-    ],
-  );
+  Widget _sessionView() => Column(children: [
+    if (_showAlarmPicker) _alarmPicker(),
+    _stagePill(),
+    const SizedBox(height: 14),
+    _timerCard(),
+    const SizedBox(height: 14),
+    _roadmap(),
+    const SizedBox(height: 16),
+    _controls(),
+    const SizedBox(height: 8),
+    TextButton.icon(
+      onPressed: () {
+        _timer?.cancel(); _timer = null;
+        // FIX: stop audio when manually changing workout
+        _audio.stop();
+        setState(() => selectedWorkout = null);
+      },
+      icon: const Icon(Icons.swap_horiz_rounded, color: Colors.white30, size: 18),
+      label: const Text('Change Workout', style: TextStyle(color: Colors.white30, fontSize: 13)),
+    ),
+  ]);
 
   Widget _stagePill() => AnimatedContainer(
     duration: const Duration(milliseconds: 350), curve: Curves.easeInOut,
     width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 11),
-    decoration: BoxDecoration(color: _stageColor.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(14), border: Border.all(color: _stageColor.withValues(alpha: 0.4), width: 1.5)),
+    decoration: BoxDecoration(color: _col.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(14), border: Border.all(color: _col.withValues(alpha: 0.4), width: 1.5)),
     child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-      Icon(isFinished ? Icons.emoji_events_rounded : isResting ? Icons.self_improvement_rounded : Icons.local_fire_department_rounded, color: _stageColor, size: 18),
+      Icon(isFinished ? Icons.emoji_events_rounded : isResting ? Icons.self_improvement_rounded : Icons.local_fire_department_rounded, color: _col, size: 18),
       const SizedBox(width: 8),
-      Text(_stageLabel, style: TextStyle(color: _stageColor, fontWeight: FontWeight.w900, fontSize: 15, letterSpacing: 3)),
-      if (!isFinished && _currentExercise != null) ...[
-        const SizedBox(width: 8), Container(width: 1, height: 14, color: _stageColor.withValues(alpha: 0.3)), const SizedBox(width: 8),
-        Text(_pillLabel, style: TextStyle(color: _stageColor.withValues(alpha: 0.85), fontSize: 13, fontWeight: FontWeight.w600)),
+      Text(_label, style: TextStyle(color: _col, fontWeight: FontWeight.w900, fontSize: 15, letterSpacing: 3)),
+      if (!isFinished && _curEx != null) ...[
+        const SizedBox(width: 8),
+        Container(width: 1, height: 14, color: _col.withValues(alpha: 0.3)),
+        const SizedBox(width: 8),
+        Text(_pillLabel, style: TextStyle(color: _col.withValues(alpha: 0.85), fontSize: 13, fontWeight: FontWeight.w600)),
       ],
     ]),
   );
@@ -351,31 +443,31 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
     width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
     decoration: BoxDecoration(
       color: _T.surface, borderRadius: BorderRadius.circular(22),
-      border: Border.all(color: _stageColor.withValues(alpha: 0.3), width: 1.5),
-      boxShadow: [BoxShadow(color: _stageColor.withValues(alpha: 0.10), blurRadius: 30, spreadRadius: 4)],
+      border: Border.all(color: _col.withValues(alpha: 0.3), width: 1.5),
+      boxShadow: [BoxShadow(color: _col.withValues(alpha: 0.10), blurRadius: 30, spreadRadius: 4)],
     ),
     child: Column(children: [
       Text(selectedWorkout!.name, style: const TextStyle(color: Colors.white60, fontSize: 13, letterSpacing: 1.5, fontWeight: FontWeight.w600)),
       const SizedBox(height: 6),
-      if (_currentExercise != null && !isFinished)
+      if (_curEx != null && !isFinished)
         AnimatedSwitcher(
           duration: const Duration(milliseconds: 300),
-          child: Text(isResting ? 'Rest' : _currentExercise!.name,
+          child: Text(isResting ? 'Rest' : _curEx!.name,
               key: ValueKey('${currentExerciseIndex}_$isResting'),
-              style: TextStyle(color: _stageColor, fontSize: 24, fontWeight: FontWeight.w800)),
+              style: TextStyle(color: _col, fontSize: 24, fontWeight: FontWeight.w800)),
         ),
       const SizedBox(height: 18),
-      isRunning ? ScaleTransition(scale: _pulse, child: _timerDigits()) : _timerDigits(),
+      isRunning ? ScaleTransition(scale: _pulse, child: _digits()) : _digits(),
       const SizedBox(height: 20),
       Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-        _pill(Icons.repeat_rounded, 'Round $currentRound/${selectedWorkout!.rounds}', _T.cyan),
+        _pill(Icons.repeat_rounded,   'Round $currentRound/${selectedWorkout!.rounds}',          _T.cyan),
         const SizedBox(width: 10),
         _pill(Icons.list_alt_rounded, 'Ex ${currentExerciseIndex + 1}/${selectedWorkout!.exercises.length}', _T.amber),
       ]),
     ]),
   );
 
-  Widget _timerDigits() => Text(_fmt(remainingSeconds), style: TextStyle(
+  Widget _digits() => Text(_fmt(remainingSeconds), style: TextStyle(
     fontSize: 80, fontWeight: FontWeight.w900,
     color: isFinished ? _T.purple : Colors.white,
     letterSpacing: -4, fontFeatures: const [FontFeature.tabularFigures()], height: 1,
@@ -390,7 +482,7 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
     ]),
   );
 
-  Widget _exerciseRoadmap() => Container(
+  Widget _roadmap() => Container(
     padding: const EdgeInsets.all(16),
     decoration: BoxDecoration(color: _T.surface, borderRadius: BorderRadius.circular(18), border: Border.all(color: _T.border)),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -398,8 +490,8 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
       const SizedBox(height: 12),
       ...List.generate(selectedWorkout!.exercises.length, (i) {
         final ex = selectedWorkout!.exercises[i];
-        final isDone   = i < currentExerciseIndex || isFinished;
-        final isActive = i == currentExerciseIndex && !isFinished;
+        final done   = i < currentExerciseIndex || isFinished;
+        final active = i == currentExerciseIndex && !isFinished;
         return Padding(
           padding: const EdgeInsets.only(bottom: 10),
           child: Row(children: [
@@ -408,25 +500,25 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
               width: 32, height: 32,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: isDone ? _T.purple.withValues(alpha: 0.18) : isActive ? _stageColor.withValues(alpha: 0.18) : Colors.white.withValues(alpha: 0.05),
-                border: Border.all(color: isDone ? _T.purple : isActive ? _stageColor : Colors.white24, width: isActive ? 2 : 1),
+                color: done ? _T.purple.withValues(alpha: 0.18) : active ? _col.withValues(alpha: 0.18) : Colors.white.withValues(alpha: 0.05),
+                border: Border.all(color: done ? _T.purple : active ? _col : Colors.white24, width: active ? 2 : 1),
               ),
-              child: Center(child: isDone
+              child: Center(child: done
                   ? const Icon(Icons.check_rounded, size: 15, color: _T.purple)
-                  : Text('${i + 1}', style: TextStyle(color: isActive ? _stageColor : Colors.white38, fontSize: 12, fontWeight: FontWeight.w800))),
+                  : Text('${i + 1}', style: TextStyle(color: active ? _col : Colors.white38, fontSize: 12, fontWeight: FontWeight.w800))),
             ),
             const SizedBox(width: 12),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(ex.name, style: TextStyle(
-                color: isDone ? Colors.white30 : isActive ? Colors.white : Colors.white60,
-                fontWeight: isActive ? FontWeight.w700 : FontWeight.w500, fontSize: 14,
-                decoration: isDone ? TextDecoration.lineThrough : null, decorationColor: Colors.white24,
+                color: done ? Colors.white30 : active ? Colors.white : Colors.white60,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w500, fontSize: 14,
+                decoration: done ? TextDecoration.lineThrough : null, decorationColor: Colors.white24,
               )),
               const SizedBox(height: 2),
               Text('${ex.workSeconds}s work  ·  ${ex.restSeconds}s rest', style: const TextStyle(color: Colors.white24, fontSize: 11)),
             ])),
-            if (isActive && !isResting)
-              Container(width: 8, height: 8, decoration: BoxDecoration(shape: BoxShape.circle, color: _stageColor, boxShadow: [BoxShadow(color: _stageColor.withValues(alpha: 0.55), blurRadius: 6)])),
+            if (active && !isResting)
+              Container(width: 8, height: 8, decoration: BoxDecoration(shape: BoxShape.circle, color: _col, boxShadow: [BoxShadow(color: _col.withValues(alpha: 0.55), blurRadius: 6)])),
           ]),
         );
       }),
@@ -436,12 +528,12 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
   Widget _controls() => Row(children: [
     Expanded(flex: 2, child: _ctrlBtn(
       label: isRunning ? 'Pause' : isFinished ? 'Done!' : 'Start',
-      icon: isRunning ? Icons.pause_rounded : Icons.play_arrow_rounded,
-      color: isFinished ? _T.purple : _stageColor,
-      onTap: isFinished ? null : isRunning ? _pauseTimer : _startTimer,
+      icon:  isRunning ? Icons.pause_rounded : isFinished ? Icons.check_circle_rounded : Icons.play_arrow_rounded,
+      color: isFinished ? _T.purple : _col,
+      onTap: isFinished ? () => Navigator.maybePop(context) : isRunning ? _pause : _start,
     )),
     const SizedBox(width: 12),
-    Expanded(child: _ctrlBtn(label: 'Reset', icon: Icons.refresh_rounded, color: Colors.white24, textColor: Colors.white60, onTap: _resetTimer, outlined: true)),
+    Expanded(child: _ctrlBtn(label: 'Reset', icon: Icons.refresh_rounded, color: Colors.white24, textColor: Colors.white60, onTap: _reset, outlined: true)),
   ]);
 
   Widget _ctrlBtn({required String label, required IconData icon, required Color color, Color? textColor, VoidCallback? onTap, bool outlined = false}) =>
@@ -457,16 +549,17 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
             boxShadow: outlined ? null : [BoxShadow(color: color.withValues(alpha: 0.28), blurRadius: 14, offset: const Offset(0, 4))],
           ),
           child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Icon(icon, color: textColor ?? Colors.black, size: 20), const SizedBox(width: 6),
+            Icon(icon, color: textColor ?? Colors.black, size: 20),
+            const SizedBox(width: 6),
             Text(label, style: TextStyle(color: textColor ?? Colors.black, fontWeight: FontWeight.w800, fontSize: 15)),
           ]),
         ),
       );
 
-  // ── Saved Workout Section ─────────────────────────────────────────────────
+  // ── Workout List ──────────────────────────────────────────────────────────
 
-  Widget _savedWorkoutSection() => StreamBuilder<QuerySnapshot>(
-    stream: _workoutRef.snapshots(),
+  Widget _workoutList() => StreamBuilder<QuerySnapshot>(
+    stream: _ref.snapshots(),
     builder: (ctx, snap) {
       if (snap.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: _T.cyan));
       if (!snap.hasData || snap.data!.docs.isEmpty) {
@@ -476,11 +569,11 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
           child: const Center(child: Text('No workouts yet — create one below!', style: TextStyle(color: Colors.white38, fontSize: 13))),
         );
       }
-      return Column(children: snap.data!.docs.map(SavedWorkout.fromFirestore).map(_workoutTile).toList());
+      return Column(children: snap.data!.docs.map(SavedWorkout.fromFirestore).map(_tile).toList());
     },
   );
 
-  Widget _workoutTile(SavedWorkout w) => GestureDetector(
+  Widget _tile(SavedWorkout w) => GestureDetector(
     onTap: () => _selectWorkout(w),
     child: Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -499,12 +592,10 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
           Text('${w.exercises.length} ${w.exercises.length == 1 ? "stage" : "stages"} · ${w.rounds} ${w.rounds == 1 ? "round" : "rounds"} · ${w.category}',
               style: const TextStyle(color: Colors.white38, fontSize: 12)),
         ])),
-        // ── Delete button ──────────────────────────────────────────────
         GestureDetector(
           onTap: () => _deleteWorkout(w),
           child: Container(
-            margin: const EdgeInsets.only(left: 8),
-            padding: const EdgeInsets.all(8),
+            margin: const EdgeInsets.only(left: 8), padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(color: _T.red.withValues(alpha: 0.10), borderRadius: BorderRadius.circular(10), border: Border.all(color: _T.red.withValues(alpha: 0.25))),
             child: const Icon(Icons.delete_outline_rounded, color: _T.red, size: 16),
           ),
@@ -517,7 +608,7 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
 
   // ── Create Workout Form ───────────────────────────────────────────────────
 
-  Widget _createWorkoutCard() {
+  Widget _createCard() {
     const cats = ['Strength', 'Cardio', 'HIT', 'Flexibility', 'Mixed'];
     return Container(
       padding: const EdgeInsets.all(18),
@@ -529,37 +620,34 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
           GestureDetector(onTap: () => setState(() => showCreateWorkout = false), child: const Icon(Icons.close_rounded, color: Colors.white30, size: 20)),
         ]),
         const SizedBox(height: 14),
-        _formField(_nameCtrl, 'Workout Name', Icons.label_outline_rounded),
+        _field(_nameCtrl,   'Workout Name', Icons.label_outline_rounded),
         const SizedBox(height: 10),
-        _formField(_roundsCtrl, 'Rounds', Icons.repeat_rounded, isNum: true),
+        _field(_roundsCtrl, 'Rounds',       Icons.repeat_rounded, isNum: true),
         const SizedBox(height: 14),
         const Text('Category', style: TextStyle(color: Colors.white38, fontSize: 12)),
         const SizedBox(height: 8),
-        Wrap(
-          spacing: 8, runSpacing: 6,
-          children: cats.map((c) {
-            final sel = _selectedCategory == c;
-            return GestureDetector(
-              onTap: () => setState(() => _selectedCategory = c),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                decoration: BoxDecoration(
-                  color: sel ? _T.cyan.withValues(alpha: 0.18) : Colors.white.withValues(alpha: 0.06),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: sel ? _T.cyan : Colors.transparent),
-                ),
-                child: Text(c, style: TextStyle(color: sel ? _T.cyan : Colors.white60, fontSize: 13, fontWeight: sel ? FontWeight.w700 : FontWeight.w500)),
+        Wrap(spacing: 8, runSpacing: 6, children: cats.map((c) {
+          final sel = _category == c;
+          return GestureDetector(
+            onTap: () => setState(() => _category = c),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: sel ? _T.cyan.withValues(alpha: 0.18) : Colors.white.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: sel ? _T.cyan : Colors.transparent),
               ),
-            );
-          }).toList(),
-        ),
+              child: Text(c, style: TextStyle(color: sel ? _T.cyan : Colors.white60, fontSize: 13, fontWeight: sel ? FontWeight.w700 : FontWeight.w500)),
+            ),
+          );
+        }).toList()),
         const SizedBox(height: 18),
         Row(children: [
           const Text('STAGES', style: TextStyle(color: Colors.white38, fontSize: 11, letterSpacing: 2, fontWeight: FontWeight.w700)),
           const Spacer(),
           GestureDetector(
-            onTap: () => setState(() => _exerciseEntries.add(_ExerciseFormEntry())),
+            onTap: () => setState(() => _entries.add(_ExEntry())),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(color: _T.amber.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(8), border: Border.all(color: _T.amber.withValues(alpha: 0.3))),
@@ -571,7 +659,7 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
           ),
         ]),
         const SizedBox(height: 10),
-        ..._exerciseEntries.asMap().entries.map((e) => _exerciseFormRow(e.key, e.value)),
+        ..._entries.asMap().entries.map((e) => _exRow(e.key, e.value)),
         const SizedBox(height: 16),
         GestureDetector(
           onTap: _saveWorkout,
@@ -589,35 +677,34 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
     );
   }
 
-  Widget _exerciseFormRow(int index, _ExerciseFormEntry e) => Container(
-    margin: const EdgeInsets.only(bottom: 10),
-    padding: const EdgeInsets.all(12),
+  Widget _exRow(int i, _ExEntry e) => Container(
+    margin: const EdgeInsets.only(bottom: 10), padding: const EdgeInsets.all(12),
     decoration: BoxDecoration(color: _T.surfaceAlt, borderRadius: BorderRadius.circular(14), border: Border.all(color: _T.border)),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         Container(
           width: 22, height: 22,
           decoration: BoxDecoration(shape: BoxShape.circle, color: _T.amber.withValues(alpha: 0.15), border: Border.all(color: _T.amber.withValues(alpha: 0.4))),
-          child: Center(child: Text('${index + 1}', style: const TextStyle(color: _T.amber, fontSize: 11, fontWeight: FontWeight.w800))),
+          child: Center(child: Text('${i + 1}', style: const TextStyle(color: _T.amber, fontSize: 11, fontWeight: FontWeight.w800))),
         ),
         const SizedBox(width: 8),
         const Text('Stage', style: TextStyle(color: Colors.white60, fontSize: 13, fontWeight: FontWeight.w600)),
         const Spacer(),
-        if (_exerciseEntries.length > 1)
-          GestureDetector(onTap: () => setState(() => _exerciseEntries.removeAt(index)), child: const Icon(Icons.remove_circle_outline_rounded, color: Colors.white24, size: 18)),
+        if (_entries.length > 1)
+          GestureDetector(onTap: () => setState(() => _entries.removeAt(i)), child: const Icon(Icons.remove_circle_outline_rounded, color: Colors.white24, size: 18)),
       ]),
       const SizedBox(height: 10),
-      _formField(e.nameCtrl, 'Exercise name (e.g. Push Up)', Icons.accessibility_new_rounded),
+      _field(e.nameCtrl, 'Exercise name (e.g. Push Up)', Icons.accessibility_new_rounded),
       const SizedBox(height: 8),
       Row(children: [
-        Expanded(child: _formField(e.workCtrl, 'Work (sec)', Icons.timer_rounded, isNum: true)),
+        Expanded(child: _field(e.workCtrl, 'Work (sec)', Icons.timer_rounded, isNum: true)),
         const SizedBox(width: 8),
-        Expanded(child: _formField(e.restCtrl, 'Rest (sec)', Icons.hourglass_bottom_rounded, isNum: true)),
+        Expanded(child: _field(e.restCtrl, 'Rest (sec)', Icons.hourglass_bottom_rounded, isNum: true)),
       ]),
     ]),
   );
 
-  Widget _formField(TextEditingController ctrl, String hint, IconData icon, {bool isNum = false}) => TextField(
+  Widget _field(TextEditingController ctrl, String hint, IconData icon, {bool isNum = false}) => TextField(
     controller: ctrl,
     keyboardType: isNum ? TextInputType.number : TextInputType.text,
     inputFormatters: isNum ? [FilteringTextInputFormatter.digitsOnly] : null,
@@ -627,7 +714,7 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
       prefixIcon: Icon(icon, color: Colors.white24, size: 16),
       filled: true, fillColor: _T.bg,
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+      border:        OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
       focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: _T.cyan, width: 1.2)),
     ),
   );
@@ -635,11 +722,9 @@ class _WorkoutSessionScreenState extends State<WorkoutSessionScreen>
 
 // ── Exercise Form Entry ───────────────────────────────────────────────────────
 
-class _ExerciseFormEntry {
+class _ExEntry {
   final nameCtrl = TextEditingController();
   final workCtrl = TextEditingController(text: '30');
   final restCtrl = TextEditingController(text: '10');
-
   void dispose() { nameCtrl.dispose(); workCtrl.dispose(); restCtrl.dispose(); }
 }
-
